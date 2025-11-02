@@ -10,7 +10,19 @@ Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de p
 
 ![Aperçu de l'application](images/interface.png)
 
+<h2>🎥 Démonstration</h2>
+
+<a href="https://www.youtube.com/watch?v=QzwhTnUbOB0" target="_blank">
+  <img src="https://img.youtube.com/vi/QzwhTnUbOB0/maxresdefault.jpg"
+       alt="Démonstration pv-scanner"
+       width="600">
+</a>
+
+*Cliquez sur l’image pour visionner la vidéo de démonstration sur YouTube.*
+
+
 ---
+
 
 ## 🚀 Fonctionnalités principales
 
@@ -33,6 +45,7 @@ Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de p
 
 ---
 
+
 ## 🖥️ Utilisation
 
 1. Lancez l’application :
@@ -46,6 +59,7 @@ Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de p
 
 ---
 
+
 ## 🧩 Dépendances
 
 - **Python 3.x**
@@ -58,6 +72,7 @@ pip install PyQt6
 
 ---
 
+
 ## ⚙️ Notes techniques
 
 - Les poids sont extraits selon la norme **GS1** :
@@ -67,6 +82,7 @@ pip install PyQt6
 - Le CSV est encodé en **UTF-8 avec BOM** pour compatibilité Excel.
 
 ---
+
 
 ## 🏗️ Création d’un exécutable Windows
 
@@ -99,6 +115,7 @@ Pour distribuer l’application sans installer Python, générez un **exécutabl
 
 ---
 
+
 ## 👤 À propos
 
 **Développé par** : [www.gaigher.fr](https://www.gaigher.fr)  
@@ -108,6 +125,7 @@ Pour distribuer l’application sans installer Python, générez un **exécutabl
 👉 [Ouvrir une issue](https://github.com/gaigher/pv-scanner/issues)
 
 ---
+
 
 ## 📜 Licence
 
