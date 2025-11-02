@@ -1,9 +1,10 @@
-# 🧾 pv-scanner — Inventaire Poids Variable GS1
+# 🧾 pv-scanner — Inventaire Poids Variable GS1 [![Dernière version](https://img.shields.io/github/v/release/gaigher/pv-scanner?label=Version&style=for-the-badge)](https://github.com/gaigher/pv-scanner/releases/latest)
 
 [![Python](https://img.shields.io/badge/Python-3.x-blue.svg)](https://www.python.org/)
 [![PyQt6](https://img.shields.io/badge/Framework-PyQt6-green.svg)](https://pypi.org/project/PyQt6/)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
 [![Issues](https://img.shields.io/github/issues/gaigher/pv-scanner.svg)](https://github.com/gaigher/pv-scanner/issues)
+
 
 **pv-scanner** est une application de bureau ergonomique développée pour la **saisie rapide de codes-barres GS1 à poids variable**, avec **export CSV**.  
 Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de produits alimentaires** via un simple **scanner de codes-barres**.
@@ -115,6 +116,20 @@ Pour distribuer l’application sans installer Python, générez un **exécutabl
 
 ---
 
+<h2>🚀 Téléchargement</h2>
+
+<p>
+  <a href="https://github.com/gaigher/pv-scanner/releases/latest">
+    <img src="https://img.shields.io/github/v/release/gaigher/pv-scanner?label=Version&style=for-the-badge" alt="Dernière version">
+  </a>
+</p>
+
+<p>
+  👉 <a href="https://github.com/gaigher/pv-scanner/releases/tag/v1.0.0">Télécharger la version Windows (.exe)</a><br>
+  *Fichier autonome, aucune installation Python requise.*
+</p>
+
+---
 
 ## 👤 À propos
 
