@@ -162,7 +162,7 @@ Pour distribuer l’application sans installer Python, générez un **exécutabl
 </p>
 
 <p>
-  👉 <a href="https://github.com/gaigher/pv-scanner/releases/tag/v1.0.0">Télécharger la version Windows (.exe)</a><br>
+  👉 <a href="https://github.com/gaigher/pv-scanner/releases/tag/v2.0.0">Télécharger la version Windows (.exe)</a><br>
   *Fichier autonome, aucune installation Python requise.*
 </p>
 
