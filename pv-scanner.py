@@ -3,10 +3,10 @@
 
 import os
 import sys
-import re
 import csv
+import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Tuple
 
 import platform
 if platform.system() == "Windows":
@@ -14,48 +14,286 @@ if platform.system() == "Windows":
 else:
     winsound = None
 
-from PyQt6 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtWidgets, QtCore, QtGui  # pyright: ignore
 
 
+
+# Fichier pour sauvegarder les patterns de parsing manuel
+PATTERNS_FILE = "patterns_parse.json"
+
+def charger_patterns() -> Dict[str, Dict]:
+    """
+    Charge les patterns de parsing manuel depuis le fichier JSON.
+    Retourne un dictionnaire vide si le fichier n'existe pas ou est invalide.
+    """
+    if not os.path.exists(PATTERNS_FILE):
+        return {}
+    try:
+        with open(PATTERNS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def sauvegarder_patterns(patterns: Dict[str, Dict]):
+    """
+    Sauvegarde les patterns de parsing manuel dans le fichier JSON.
+    """
+    try:
+        with open(PATTERNS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(patterns, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+def appliquer_pattern(code: str, pattern: Dict) -> Optional[str]:
+    """
+    Applique un pattern sauvegardé à un code-barres.
+    Retourne le poids formaté ou None si le pattern ne correspond pas.
+    """
+    pos_debut = pattern.get('pos_debut', 0)
+    pos_decimal = pattern.get('pos_decimal', -1)
+    longueur = pattern.get('longueur', 0)
+    
+    # Vérifier si le code correspond au pattern (longueur ou préfixe)
+    if 'longueur_code' in pattern:
+        if len(code) != pattern['longueur_code']:
+            return None
+    if 'prefixe' in pattern:
+        if not code.startswith(pattern['prefixe']):
+            return None
+    
+    # Extraire le poids
+    if longueur > 0:
+        poids_brut = code[pos_debut:pos_debut + longueur]
+    else:
+        poids_brut = code[pos_debut:]
+    
+    # Formater avec la décimale
+    if pos_decimal >= 0 and pos_decimal < len(poids_brut):
+        partie_entiere = poids_brut[:pos_decimal]
+        partie_decimale = poids_brut[pos_decimal:]
+        poids_formate = partie_entiere + "," + partie_decimale
+        try:
+            partie_entiere_int = str(int(partie_entiere)) if partie_entiere else "0"
+            poids_formate = partie_entiere_int + "," + partie_decimale
+        except ValueError:
+            pass
+    else:
+        poids_formate = poids_brut
+        try:
+            poids_formate = str(int(poids_brut))
+        except ValueError:
+            pass
+    
+    return poids_formate
+
+def parser_code_gs1(chaine: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Parse un code GS1 et retourne (poids_ia, poids_valeur, date_valeur).
+    
+    Retourne:
+        - poids_ia: L'IA du poids trouvé (ex: "3103") ou None
+        - poids_valeur: La valeur brute du poids (6 chiffres) ou None
+        - date_valeur: La valeur brute de la DLC (6 chiffres AAMMJJ) ou None
+    """
+    if chaine is None or len(chaine) < 2:
+        return None, None, None
+    
+    # Définition des IA avec longueur fixe de données (selon norme GS1)
+    # On inclut les IA standards même si on ne les utilise pas, pour pouvoir les sauter
+    ia_longueurs = {
+        '00': 18,   # SSCC (Serial Shipping Container Code)
+        '01': 14,   # GTIN
+        '02': 14,   # GTIN of Contained Trade Items
+        '11': 6,    # Date de production (AAMMJJ)
+        '12': 6,    # Due Date (AAMMJJ)
+        '13': 6,    # Packaging Date (AAMMJJ)
+        '15': 6,    # Date limite de consommation (AAMMJJ)
+        '16': 6,    # Sell By Date (AAMMJJ)
+        '17': 6,    # Date d'expiration (AAMMJJ)
+        '3100': 6,  # Poids net (kg) - 0 décimale
+        '3101': 6,  # Poids net (kg) - 1 décimale
+        '3102': 6,  # Poids net (kg) - 2 décimales
+        '3103': 6,  # Poids net (kg) - 3 décimales
+        '3104': 6,  # Poids net (kg) - 4 décimales
+        '3105': 6,  # Poids net (kg) - 5 décimales
+        '3200': 6,  # Poids net (livres) - 0 décimale
+        '3201': 6,  # Poids net (livres) - 1 décimale
+        '3202': 6,  # Poids net (livres) - 2 décimales
+        '3203': 6,  # Poids net (livres) - 3 décimales
+        '3204': 6,  # Poids net (livres) - 4 décimales
+        '3205': 6,  # Poids net (livres) - 5 décimales
+        '3300': 6,  # Poids logistique (kg) - 0 décimale
+        '3301': 6,  # Poids logistique (kg) - 1 décimale
+        '3302': 6,  # Poids logistique (kg) - 2 décimales
+        '3303': 6,  # Poids logistique (kg) - 3 décimales
+        '3304': 6,  # Poids logistique (kg) - 4 décimales
+        '3305': 6,  # Poids logistique (kg) - 5 décimales
+    }
+    
+    # IA à longueur variable (nécessitent un séparateur FNC1 ou détection du prochain IA)
+    ia_longueur_variable = {'10', '21', '22'}  # 10: Numéro de lot, 21: Numéro de série, 22: Consumer Product Variant
+    
+    # Parsing séquentiel depuis le début (conforme norme GS1)
+    pos = 0
+    poids_ia = None
+    poids_valeur = None
+    date_valeur = None
+    
+    while pos < len(chaine):
+        ia_trouve = False
+        
+        # Chercher d'abord les IA de 2 chiffres
+        if pos + 2 <= len(chaine):
+            ia_2 = chaine[pos:pos+2]
+            if ia_2 in ia_longueurs:
+                longueur = ia_longueurs[ia_2]
+                if pos + 2 + longueur <= len(chaine):
+                    valeur = chaine[pos+2:pos+2+longueur]
+                    # Si c'est l'IA (15) pour la DLC, on le stocke
+                    if ia_2 == '15':
+                        date_valeur = valeur
+                    # IA trouvé : on saute l'IA (2) + ses données (longueur)
+                    pos += 2 + longueur
+                    ia_trouve = True
+                    continue
+            elif ia_2 in ia_longueur_variable:
+                # IA à longueur variable (ex: IA 10 = numéro de lot)
+                pos_donnees = pos + 2
+                pos_prochain_ia = None
+                
+                # Chercher le prochain IA connu en avançant caractère par caractère
+                for i in range(pos_donnees, min(pos_donnees + 20, len(chaine))):
+                    if i + 2 <= len(chaine):
+                        ia_test_2 = chaine[i:i+2]
+                        if ia_test_2 in ia_longueurs:
+                            pos_prochain_ia = i
+                            break
+                    if i + 4 <= len(chaine):
+                        ia_test_4 = chaine[i:i+4]
+                        if ia_test_4 in ia_longueurs:
+                            pos_prochain_ia = i
+                            break
+                
+                if pos_prochain_ia is not None:
+                    pos = pos_prochain_ia
+                    ia_trouve = True
+                    continue
+                else:
+                    break
+        
+        # Chercher les IA de 4 chiffres
+        if not ia_trouve and pos + 4 <= len(chaine):
+            ia_4 = chaine[pos:pos+4]
+            if ia_4 in ia_longueurs:
+                longueur = ia_longueurs[ia_4]
+                if pos + 4 + longueur <= len(chaine):
+                    valeur = chaine[pos+4:pos+4+longueur]
+                    # Si c'est un IA de poids (310x, 320x, 330x), on le stocke
+                    if ia_4.startswith('310') or ia_4.startswith('320') or ia_4.startswith('330'):
+                        poids_ia = ia_4
+                        poids_valeur = valeur
+                    # IA trouvé : on saute l'IA (4) + ses données (longueur)
+                    pos += 4 + longueur
+                    ia_trouve = True
+                    continue
+        
+        # Si aucun IA reconnu à cette position, chercher le prochain IA connu
+        # pour ignorer les IA non reconnus et continuer le parsing
+        if not ia_trouve:
+            pos_prochain_ia = None
+            # Chercher le prochain IA connu en avançant caractère par caractère
+            for i in range(pos + 1, min(pos + 30, len(chaine))):  # Chercher jusqu'à 30 caractères
+                # Vérifier si on trouve un IA de 2 chiffres connu
+                if i + 2 <= len(chaine):
+                    ia_test_2 = chaine[i:i+2]
+                    if ia_test_2 in ia_longueurs or ia_test_2 in ia_longueur_variable:
+                        pos_prochain_ia = i
+                        break
+                # Vérifier si on trouve un IA de 4 chiffres connu
+                if i + 4 <= len(chaine):
+                    ia_test_4 = chaine[i:i+4]
+                    if ia_test_4 in ia_longueurs:
+                        pos_prochain_ia = i
+                        break
+            
+            if pos_prochain_ia is not None:
+                # On a trouvé un IA connu, on saute jusqu'à lui
+                pos = pos_prochain_ia
+                continue
+            else:
+                # Aucun IA connu trouvé, on arrête
+                break
+    
+    return poids_ia, poids_valeur, date_valeur
 
 def formater_ligne(ligne: str):
     """
     Analyse une ligne brute (code scanné) et renvoie une chaîne formatée
     représentant le poids avec une virgule décimale (ex: "1,234").
     Retourne None si la ligne ne correspond pas à un format connu.
+    
     Règles :
-    - Si la chaîne fait 13 caractères : extrait positions 7–11 (5 caractères)
-      et rend "xx,xxx".
-    - Sinon, cherche un segment "310xYYYYYY" dans la position prévue (16:26)
-      et applique le découpage en fonction de x (3100..3105).
+    - Si la chaîne fait 13 caractères (EAN-13) : extrait positions 7–11 (5 caractères) et rend "xx,xxx".
+    - Sinon, parse dynamiquement les IA GS1 en recherchant séquentiellement :
+      * IA 01 : GTIN (14 chiffres)
+      * IA 310x : Poids net en kg (6 chiffres, x = nombre de décimales)
+      * IA 15 : DLC (6 chiffres)
+      * Et autres IA selon la norme GS1
+    - Si aucun format reconnu, essayer les patterns sauvegardés.
     """
     if ligne is None:
         return None
     chaine = ligne.strip()
+    
+    # Format EAN-13 (13 caractères)
     if len(chaine) == 13:
         extrait = chaine[7:12]
         if len(extrait) >= 5:
             return extrait[0:2] + "," + extrait[2:]
         return None
-    if len(chaine) < 26:
-        return None
-    sous_chaine = chaine[16:26]
-    if not sous_chaine.startswith("310"):
-        return None
-    prefixe = sous_chaine[0:4]
-    nombre = sous_chaine[4:]
-    formats_map = {
-        "3100": lambda n: n,
-        "3101": lambda n: (n[:5] + "," + n[5:]) if len(n) > 5 else None,
-        "3102": lambda n: (n[:4] + "," + n[4:]) if len(n) > 4 else None,
-        "3103": lambda n: (n[:3] + "," + n[3:]) if len(n) > 3 else None,
-        "3104": lambda n: (n[:2] + "," + n[2:]) if len(n) > 2 else None,
-        "3105": lambda n: (n[:1] + "," + n[1:]) if len(n) > 1 else None,
-    }
-    fonction_fmt = formats_map.get(prefixe)
-    if not fonction_fmt:
-        return None
-    return fonction_fmt(nombre)
+    
+    # Format GS1 : utiliser la fonction commune de parsing
+    poids_ia, poids_valeur, _ = parser_code_gs1(chaine)
+    
+    # Si on a trouvé un IA de poids, on le formate
+    if poids_ia and poids_valeur:
+        if len(poids_valeur) == 6:
+            # Le dernier chiffre de l'IA indique le nombre de décimales
+            nb_decimales = int(poids_ia[3])
+            
+            # Extraire la valeur numérique du poids
+            if nb_decimales == 0:
+                poids_brut = int(poids_valeur)
+            else:
+                partie_entiere_str = poids_valeur[:6-nb_decimales]
+                partie_decimale_str = poids_valeur[6-nb_decimales:]
+                poids_brut = float(partie_entiere_str + "." + partie_decimale_str)
+            
+            # Convertir les livres (320x) en kilogrammes (1 livre = 0.453592 kg)
+            if poids_ia.startswith('320'):
+                poids_brut = poids_brut * 0.453592
+            
+            # Pour 330x (poids logistique), on garde tel quel (déjà en kg)
+            # Pour 310x (poids net), on garde tel quel (déjà en kg)
+            
+            # Formater le résultat en kg avec virgule
+            poids_kg_str = f"{poids_brut:.6f}".rstrip('0').rstrip('.')
+            if '.' in poids_kg_str:
+                partie_entiere, partie_decimale = poids_kg_str.split('.')
+                # Enlever les zéros non significatifs à gauche de la partie entière
+                partie_entiere = str(int(partie_entiere)) if partie_entiere else "0"
+                return partie_entiere + "," + partie_decimale
+            else:
+                return str(int(poids_brut))
+    
+    # Si aucun format reconnu, essayer les patterns sauvegardés
+    patterns = charger_patterns()
+    for pattern_key, pattern in patterns.items():
+        resultat = appliquer_pattern(chaine, pattern)
+        if resultat:
+            return resultat
+    
+    return None
 
 
 def valeur_formatee_vers_float(valeur: str) -> float:
@@ -77,39 +315,44 @@ def valeur_formatee_vers_float(valeur: str) -> float:
 
 def extraire_dlc_from_scan(texte: str) -> Optional[str]:
     """
-    Extrait la DLC (AI 15) du texte fourni en respectant la contrainte
-    "à partir du 27ème caractère (index 26)". Renvoie une chaîne au format
-    'DD/MM/YYYY' si valide, sinon None.
+    Extrait la DLC (AI 15) du texte fourni en parsant séquentiellement les IA GS1.
+    l'identifiant d'application (15) dans le code-barres GS1.
+    Renvoie une chaîne au format 'DD/MM/YYYY' si valide, sinon None.
 
-    - Cherche le motif 15(\d{6}) dans texte[26:].
-    - Interprète YYMMDD → 20YY-MM-DD (valide jusqu'en 2099).
+    Conforme à la norme GS1 pour le parsing des identifiants d'application (IA).
+    - Utilise la fonction commune parser_code_gs1 pour extraire l'IA (15).
+    - L'IA (15) contient 6 chiffres au format AAMMJJ (Date Limite de Consommation).
+    - Interprète AAMMJJ → 20AA-MM-JJ (valide jusqu'en 2099).
     - Si date invalide, retourne None.
     """
     if texte is None:
         return None
     texte_nettoye = texte.strip()
-    if len(texte_nettoye) <= 26:
+    if len(texte_nettoye) < 8:  # Minimum : "15" + 6 chiffres
         return None
-    reste = texte_nettoye[26:]
-    match = re.search(r"15(\d{6})", reste)
-    if not match:
-        return None
-    yymmjj = match.group(1)
-    try:
-        aa = int(yymmjj[0:2])
-        mois = int(yymmjj[2:4])
-        jour = int(yymmjj[4:6])
-        annee = 2000 + aa  # règle : YY -> 20YY
-        date_obj = datetime(annee, mois, jour)  # valider date
-    except Exception:
-        return None
-    return f"{date_obj.day:02d}/{date_obj.month:02d}/{date_obj.year:04d}"
+    
+    # Utiliser la fonction commune de parsing
+    _, _, date_valeur = parser_code_gs1(texte_nettoye)
+    
+    # Si on a trouvé l'IA (15), on parse la date
+    if date_valeur and len(date_valeur) == 6:
+        try:
+            aa = int(date_valeur[0:2])
+            mois = int(date_valeur[2:4])
+            jour = int(date_valeur[4:6])
+            annee = 2000 + aa  # règle : AA -> 20AA
+            date_obj = datetime(annee, mois, jour)  # valider date
+            return f"{date_obj.day:02d}/{date_obj.month:02d}/{date_obj.year:04d}"
+        except Exception:
+            return None
+    
+    return None
 
 
 class TablePV(QtWidgets.QTableWidget):
     """
-    QTableWidget adapté : gestion améliorée du collage multi-lignes.
-    La table a désormais 2 colonnes : [Poids en kg, DLC].
+    Collage multi-lignes.
+    La table a 2 colonnes : [Poids en kg, DLC].
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -206,15 +449,17 @@ def resource_path(relative_path):
 
 class FenetrePrincipalePV(QtWidgets.QMainWindow):
     """
-    Fenêtre principale de l'application PV (version francisée).
-    Contient le champ de scan, la table des poids (avec colonne DLC),
-    les contrôles de zoom, le bouton "Créer CSV", le bouton nettoyer, et le champ total affiché.
+    Fenêtre principale de l'application PV.
+    Contient le champ de scan, la table des poids et DLC,
+    les contrôles de zoom, le bouton audio pour mettre en muet, le bouton "Créer CSV", le bouton nettoyer,
+    le bouton Parse manuel, et le champ total affiché.
     """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Poids Variable Inventaire")
         self.setWindowIcon(QtGui.QIcon(resource_path("favicon.ico")))
         self.resize(720, 460)
+        self.son_active = True
 
         zone_centrale = QtWidgets.QWidget()
         self.setCentralWidget(zone_centrale)
@@ -231,6 +476,11 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
 
         mise_haut.addWidget(self.champ_scan)
         mise_haut.addStretch()
+        # Bouton Parse manuel
+        self.bouton_parse_manuel = QtWidgets.QPushButton("Parse manuel")
+        self.bouton_parse_manuel.setToolTip("Parser manuellement un code-barres avec position du poids et décimale")
+        self.bouton_parse_manuel.clicked.connect(self.parse_manuel)
+        mise_haut.addWidget(self.bouton_parse_manuel)
         # Zoom et info à droite
         self.zoom_moins = QtWidgets.QPushButton("−")
         self.zoom_moins.setFixedSize(28, 28)
@@ -242,6 +492,12 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
         self.zoom_plus.setToolTip("Augmenter la taille de l'interface")
         self.zoom_plus.clicked.connect(lambda: self.ajuster_echelle(+0.1))
         mise_haut.addWidget(self.zoom_plus)
+        # Bouton audio pour mettre en muet
+        self.bouton_audio = QtWidgets.QPushButton("🔊")
+        self.bouton_audio.setFixedSize(28, 28)
+        self.bouton_audio.setToolTip("Activer/Désactiver le son")
+        self.bouton_audio.clicked.connect(self.basculer_son)
+        mise_haut.addWidget(self.bouton_audio)
         icone_info = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
         self.bouton_info = QtWidgets.QPushButton()
         self.bouton_info.setIcon(icone_info)
@@ -390,21 +646,22 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
         # assurer une ligne vide et mettre à jour le total
         self.table.assurer_ligne_vide()
         self.mettre_a_jour_total()
-        # feedback sonore amélioré (remplace QApplication.beep)
+        # feedback sonore
         est_erreur = self.etiquette_commentaire.text().strip() != ""
-        if winsound:
-            try:
-                if not est_erreur:
-                    # succès : court et aigu
-                    winsound.Beep(2000, 100)
-                else:
-                    # erreur : grave et double
-                    winsound.Beep(400, 150)
-                    winsound.Beep(400, 150)
-            except Exception:
+        if self.son_active:
+            if winsound:
+                try:
+                    if not est_erreur:
+                        # succès : court et aigu
+                        winsound.Beep(2000, 100)
+                    else:
+                        # erreur : grave et double
+                        winsound.Beep(400, 150)
+                        winsound.Beep(400, 150)
+                except Exception:
+                    QtWidgets.QApplication.beep()
+            else:
                 QtWidgets.QApplication.beep()
-        else:
-            QtWidgets.QApplication.beep()
         # feedback visuel : vert si pas d'erreur, rouge si commentaire d'erreur présent
         couleur_flash = "#ff4d4d" if est_erreur else "#4df164"
         self.flash_visuel(color=couleur_flash)
@@ -420,6 +677,399 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
             self.inserer_ligne_scannee(ligne)
         self.champ_scan.clear()
         QtCore.QTimer.singleShot(0, self.focaliser_champ_scan)
+
+    def parse_manuel(self):
+        """
+        Ouvre une boîte de dialogue avec un champ de scan pour parser manuellement un code-barres.
+        Permet de saisir le poids et la décimale manuellement, et de sauvegarder le pattern pour les codes similaires.
+        """
+        # Créer la boîte de dialogue
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Parse manuel")
+        dialog.setModal(True)
+        dialog.resize(500, 100)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        # Ligne du haut : label "Code-barres:" à gauche, boutons à droite
+        layout_haut = QtWidgets.QHBoxLayout()
+        layout_haut.addWidget(QtWidgets.QLabel("Code-barres:"))
+        layout_haut.addStretch()
+        
+        # Bouton pour gérer les patterns
+        bouton_gerer_patterns = QtWidgets.QPushButton("Gérer les patterns")
+        bouton_gerer_patterns.setToolTip("Voir et supprimer les patterns sauvegardés")
+        bouton_gerer_patterns.clicked.connect(lambda: self.gerer_patterns(dialog))
+        layout_haut.addWidget(bouton_gerer_patterns)
+        
+        icone_info = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
+        bouton_info_instructions = QtWidgets.QPushButton()
+        bouton_info_instructions.setIcon(icone_info)
+        bouton_info_instructions.setFixedSize(24, 24)
+        bouton_info_instructions.setToolTip("Aide - Instructions pour utiliser les marqueurs")
+        def afficher_instructions():
+            texte_instructions = (
+                "<b>Instructions pour le parsing manuel :</b><br><br>"
+                "Scannez un code-barres, puis éditez-le en insérant des marqueurs :<br><br>"
+                " <b>&gt;</b> pour marquer le début du poids<br>"
+                " <b>,</b> pour marquer la position de la décimale (optionnel)<br>"
+                " <b>&lt;</b> pour marquer la fin du poids<br><br>"
+                "Vous pouvez utiliser les boutons en dessous du champ pour insérer les marqueurs,<br>"
+                "ou les taper directement au clavier.<br>"
+                "Assurez-vous qu'apres &gt; il y et assez de zéros de remplissage pour capturer les poids avec dizaines ou centaines si d'autres codes-barres en ont."
+            )
+            QtWidgets.QMessageBox.information(
+                dialog,
+                "Instructions - Parse manuel",
+                texte_instructions
+            )
+        bouton_info_instructions.clicked.connect(afficher_instructions)
+        layout_haut.addWidget(bouton_info_instructions)
+        layout.addLayout(layout_haut)
+        
+        # Champ de scan dans la boîte de dialogue
+        layout_scan = QtWidgets.QHBoxLayout()
+        champ_scan_dialog = QtWidgets.QLineEdit()
+        champ_scan_dialog.setPlaceholderText("Scannez le code, puis insérez > , < pour marquer le poids")
+        champ_scan_dialog.returnPressed.connect(dialog.accept)
+        layout_scan.addWidget(champ_scan_dialog)
+        layout.addLayout(layout_scan)
+        
+        # Fonction pour insérer un caractère à la position du curseur
+        def inserer_marqueur(caractere: str):
+            cursor_pos = champ_scan_dialog.cursorPosition()
+            texte = champ_scan_dialog.text()
+            nouveau_texte = texte[:cursor_pos] + caractere + texte[cursor_pos:]
+            champ_scan_dialog.setText(nouveau_texte)
+            # Repositionner le curseur après le caractère inséré
+            champ_scan_dialog.setCursorPosition(cursor_pos + 1)
+            champ_scan_dialog.setFocus()
+        
+        # Boutons pour insérer les marqueurs (en dessous du champ de scan)
+        layout_boutons_marqueurs = QtWidgets.QHBoxLayout()
+        layout_boutons_marqueurs.addStretch()  # Aligner à droite ou centrer
+        
+        bouton_debut = QtWidgets.QPushButton(">")
+        bouton_debut.setToolTip("Insérer '>' pour marquer le début du poids")
+        bouton_debut.setFixedSize(30, 30)
+        bouton_debut.clicked.connect(lambda: inserer_marqueur('>'))
+        layout_boutons_marqueurs.addWidget(bouton_debut)
+        
+        bouton_decimal = QtWidgets.QPushButton(",")
+        bouton_decimal.setToolTip("Insérer ',' pour marquer la position de la décimale")
+        bouton_decimal.setFixedSize(30, 30)
+        bouton_decimal.clicked.connect(lambda: inserer_marqueur(','))
+        layout_boutons_marqueurs.addWidget(bouton_decimal)
+        
+        bouton_fin = QtWidgets.QPushButton("<")
+        bouton_fin.setToolTip("Insérer '<' pour marquer la fin du poids")
+        bouton_fin.setFixedSize(30, 30)
+        bouton_fin.clicked.connect(lambda: inserer_marqueur('<'))
+        layout_boutons_marqueurs.addWidget(bouton_fin)
+        
+        layout_boutons_marqueurs.addStretch()  # Aligner à droite ou centrer
+        layout.addLayout(layout_boutons_marqueurs)
+        
+        # Aperçu du résultat
+        label_apercu = QtWidgets.QLabel("Aperçu: -")
+        label_apercu.setStyleSheet("font-weight: bold; padding: 5px; font-size: 14px;")
+        label_apercu.setTextFormat(QtCore.Qt.TextFormat.RichText)  # Activer le support HTML
+        layout.addWidget(label_apercu)
+        
+        def parser_avec_marqueurs(code_avec_marqueurs: str) -> Tuple[Optional[str], Optional[Dict]]:
+            """
+            Parse le code avec les marqueurs spéciaux (> , <).
+            Retourne (poids_formate, pattern_dict) ou (None, None) si invalide.
+            """
+            if not code_avec_marqueurs:
+                return None, None
+            
+            # Trouver les positions des marqueurs
+            pos_debut_marqueur = code_avec_marqueurs.find('>')
+            pos_decimal_marqueur = code_avec_marqueurs.find(',')
+            pos_fin_marqueur = code_avec_marqueurs.find('<')
+            
+            # Les marqueurs > et < sont obligatoires
+            if pos_debut_marqueur == -1 or pos_fin_marqueur == -1:
+                return None, None
+            
+            # Extraire le code original (sans les marqueurs)
+            code_original = code_avec_marqueurs.replace('>', '').replace(',', '').replace('<', '')
+            
+            # Calculer les positions dans le code original
+            # On doit compter combien de marqueurs sont avant chaque position
+            def compter_marqueurs_avant(pos: int) -> int:
+                count = 0
+                for i in range(pos):
+                    if code_avec_marqueurs[i] in '>,<':
+                        count += 1
+                return count
+            
+            pos_debut = pos_debut_marqueur - compter_marqueurs_avant(pos_debut_marqueur)
+            
+            # Déterminer la fin du poids (le marqueur < est obligatoire)
+            pos_fin = pos_fin_marqueur - compter_marqueurs_avant(pos_fin_marqueur)
+            longueur = pos_fin - pos_debut
+            
+            # Extraire le poids brut
+            if longueur > 0:
+                poids_brut = code_original[pos_debut:pos_debut + longueur]
+            else:
+                poids_brut = code_original[pos_debut:]
+            
+            # Déterminer la position de la décimale
+            pos_decimal = -1
+            if pos_decimal_marqueur != -1:
+                # La position de la décimale est relative au début du poids
+                pos_decimal_dans_code = pos_decimal_marqueur - compter_marqueurs_avant(pos_decimal_marqueur)
+                pos_decimal = pos_decimal_dans_code - pos_debut
+                # Vérifier que la décimale est dans le poids
+                if pos_decimal < 0 or pos_decimal >= len(poids_brut):
+                    pos_decimal = -1
+            
+            # Formater le poids
+            if pos_decimal >= 0 and pos_decimal < len(poids_brut):
+                partie_entiere = poids_brut[:pos_decimal]
+                partie_decimale = poids_brut[pos_decimal:]
+                poids_formate = partie_entiere + "," + partie_decimale
+                try:
+                    partie_entiere_int = str(int(partie_entiere)) if partie_entiere else "0"
+                    poids_formate = partie_entiere_int + "," + partie_decimale
+                except ValueError:
+                    pass
+            else:
+                poids_formate = poids_brut
+                try:
+                    poids_formate = str(int(poids_brut))
+                except ValueError:
+                    pass
+            
+            # Créer le pattern pour sauvegarde
+            pattern = {
+                'pos_debut': pos_debut,
+                'pos_decimal': pos_decimal,
+                'longueur': longueur,
+                'longueur_code': len(code_original),
+                'prefixe': code_original[:2] if len(code_original) >= 2 else ""
+            }
+            
+            return poids_formate, pattern
+        
+        def mettre_a_jour_apercu():
+            """Met à jour l'aperçu du poids formaté"""
+            code_avec_marqueurs = champ_scan_dialog.text().strip()
+            if not code_avec_marqueurs:
+                label_apercu.setText("Aperçu: -")
+                return
+            
+            # Parser avec les marqueurs
+            poids_formate, pattern = parser_avec_marqueurs(code_avec_marqueurs)
+            
+            # Trouver les positions des marqueurs
+            pos_debut_marqueur = code_avec_marqueurs.find('>')
+            pos_fin_marqueur = code_avec_marqueurs.find('<')
+            
+            # Si les deux marqueurs > et < sont présents et que le parsing fonctionne
+            if pos_debut_marqueur != -1 and pos_fin_marqueur != -1 and poids_formate:
+                # Afficher uniquement le poids formaté en gras
+                label_apercu.setText(f"<b>Aperçu: {poids_formate}</b>")
+                return
+            
+            # Sinon, afficher le code-barres avec opacité sur les parties supprimées
+            html_parts = ["Aperçu: "]
+            
+            for i, char in enumerate(code_avec_marqueurs):
+                # Ignorer les marqueurs (ne pas les afficher)
+                if char in '>,<':
+                    continue
+                
+                # Déterminer si le caractère doit être opacifié
+                doit_etre_opacifie = False
+                if pos_debut_marqueur != -1 and i < pos_debut_marqueur:
+                    # Avant > : opacité 0.4
+                    doit_etre_opacifie = True
+                elif pos_fin_marqueur != -1 and i > pos_fin_marqueur:
+                    # Après < : opacité 0.4
+                    doit_etre_opacifie = True
+                
+                # Échapper les caractères HTML spéciaux
+                char_escaped = char.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                
+                if doit_etre_opacifie:
+                    # Utiliser rgba() pour l'opacité (plus compatible avec QLabel RichText)
+                    # #2d2d2d avec opacité 0.4
+                    html_parts.append(f'<span style="color: rgba(45, 45, 45, 0.4);">{char_escaped}</span>')
+                else:
+                    html_parts.append(char_escaped)
+            
+            label_apercu.setText(''.join(html_parts))
+        
+        # Connecter le signal pour mettre à jour l'aperçu
+        champ_scan_dialog.textChanged.connect(mettre_a_jour_apercu)
+        
+        # Boutons
+        boutons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        boutons.accepted.connect(dialog.accept)
+        boutons.rejected.connect(dialog.reject)
+        layout.addWidget(boutons)
+        
+        # Focus sur le champ de scan
+        champ_scan_dialog.setFocus()
+        
+        # Afficher la boîte de dialogue
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            code_avec_marqueurs = champ_scan_dialog.text().strip()
+            if not code_avec_marqueurs:
+                return
+            
+            # Parser avec les marqueurs
+            poids_formate, pattern = parser_avec_marqueurs(code_avec_marqueurs)
+            
+            if not poids_formate or not pattern:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Parse manuel",
+                    "Impossible de parser le code. Assurez-vous d'avoir inséré les marqueurs '>' et '<' pour indiquer le début et la fin du poids."
+                )
+                return
+            
+            # Sauvegarder le pattern
+            patterns = charger_patterns()
+            # Créer une clé basée sur la longueur et le préfixe (2 premiers caractères)
+            code_original = code_avec_marqueurs.replace('>', '').replace(',', '').replace('<', '')
+            pattern_key = f"len_{pattern['longueur_code']}_pref_{pattern['prefixe']}"
+            patterns[pattern_key] = pattern
+            sauvegarder_patterns(patterns)
+            
+            # Le pattern est sauvegardé, mais le poids n'est pas ajouté à la table
+            # Il sera utilisé automatiquement pour les codes similaires non reconnus
+            QtWidgets.QMessageBox.information(
+                self,
+                "Pattern sauvegardé",
+                f"Le pattern a été sauvegardé avec succès.\n\nPoids détecté: {poids_formate}\n\nCe pattern sera utilisé automatiquement pour les codes-barres similaires\n(prefixes {pattern['prefixe']} et longueur {pattern['longueur_code']})."
+            )
+            QtCore.QTimer.singleShot(0, self.focaliser_champ_scan)
+
+    def gerer_patterns(self, parent_dialog=None):
+        """
+        Ouvre une boîte de dialogue pour gérer les patterns sauvegardés.
+        Permet de voir et supprimer les patterns.
+        """
+        dialog_gerer = QtWidgets.QDialog(self if parent_dialog is None else parent_dialog)
+        dialog_gerer.setWindowTitle("Gérer les patterns")
+        dialog_gerer.setModal(True)
+        dialog_gerer.resize(600, 400)
+        layout_gerer = QtWidgets.QVBoxLayout(dialog_gerer)
+        
+        # Label d'information
+        label_info = QtWidgets.QLabel(
+            "Patterns sauvegardés pour le parsing manuel. Sélectionnez un pattern pour le supprimer."
+        )
+        label_info.setWordWrap(True)
+        layout_gerer.addWidget(label_info)
+        
+        # Table pour afficher les patterns
+        table_patterns = QtWidgets.QTableWidget()
+        table_patterns.setColumnCount(6)
+        table_patterns.setHorizontalHeaderLabels(["Clé", "Longueur code", "Préfixe", "Début", "Décimale", "Longueur"])
+        table_patterns.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table_patterns.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        layout_gerer.addWidget(table_patterns)
+        
+        def charger_et_afficher_patterns():
+            """Charge et affiche les patterns dans la table"""
+            patterns = charger_patterns()
+            table_patterns.setRowCount(len(patterns))
+            row = 0
+            for pattern_key, pattern in patterns.items():
+                table_patterns.setItem(row, 0, QtWidgets.QTableWidgetItem(pattern_key))
+                table_patterns.setItem(row, 1, QtWidgets.QTableWidgetItem(str(pattern.get('longueur_code', ''))))
+                table_patterns.setItem(row, 2, QtWidgets.QTableWidgetItem(pattern.get('prefixe', '')))
+                table_patterns.setItem(row, 3, QtWidgets.QTableWidgetItem(str(pattern.get('pos_debut', ''))))
+                decimale = pattern.get('pos_decimal', -1)
+                table_patterns.setItem(row, 4, QtWidgets.QTableWidgetItem(str(decimale) if decimale >= 0 else "Aucune"))
+                longueur = pattern.get('longueur', 0)
+                table_patterns.setItem(row, 5, QtWidgets.QTableWidgetItem(str(longueur) if longueur > 0 else "Jusqu'à la fin"))
+                row += 1
+            table_patterns.resizeColumnsToContents()
+        
+        # Charger les patterns au démarrage
+        charger_et_afficher_patterns()
+        
+        # Boutons
+        layout_boutons = QtWidgets.QHBoxLayout()
+        
+        bouton_supprimer = QtWidgets.QPushButton("Supprimer le pattern sélectionné")
+        def supprimer_pattern():
+            row = table_patterns.currentRow()
+            if row < 0:
+                QtWidgets.QMessageBox.warning(
+                    dialog_gerer,
+                    "Supprimer pattern",
+                    "Veuillez sélectionner un pattern à supprimer."
+                )
+                return
+            
+            pattern_key = table_patterns.item(row, 0).text()
+            reponse = QtWidgets.QMessageBox.question(
+                dialog_gerer,
+                "Confirmer la suppression",
+                f"Voulez-vous vraiment supprimer le pattern '{pattern_key}' ?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reponse == QtWidgets.QMessageBox.StandardButton.Yes:
+                patterns = charger_patterns()
+                if pattern_key in patterns:
+                    del patterns[pattern_key]
+                    sauvegarder_patterns(patterns)
+                    charger_et_afficher_patterns()
+                    QtWidgets.QMessageBox.information(
+                        dialog_gerer,
+                        "Pattern supprimé",
+                        f"Le pattern '{pattern_key}' a été supprimé."
+                    )
+        bouton_supprimer.clicked.connect(supprimer_pattern)
+        layout_boutons.addWidget(bouton_supprimer)
+        
+        bouton_tout_supprimer = QtWidgets.QPushButton("Supprimer tous les patterns")
+        def supprimer_tous():
+            patterns = charger_patterns()
+            if not patterns:
+                QtWidgets.QMessageBox.information(
+                    dialog_gerer,
+                    "Aucun pattern",
+                    "Il n'y a aucun pattern à supprimer."
+                )
+                return
+            
+            reponse = QtWidgets.QMessageBox.question(
+                dialog_gerer,
+                "Confirmer la suppression",
+                f"Voulez-vous vraiment supprimer tous les {len(patterns)} patterns ?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reponse == QtWidgets.QMessageBox.StandardButton.Yes:
+                sauvegarder_patterns({})
+                charger_et_afficher_patterns()
+                QtWidgets.QMessageBox.information(
+                    dialog_gerer,
+                    "Patterns supprimés",
+                    "Tous les patterns ont été supprimés."
+                )
+        bouton_tout_supprimer.clicked.connect(supprimer_tous)
+        layout_boutons.addWidget(bouton_tout_supprimer)
+        
+        layout_boutons.addStretch()
+        
+        bouton_fermer = QtWidgets.QPushButton("Fermer")
+        bouton_fermer.clicked.connect(dialog_gerer.accept)
+        layout_boutons.addWidget(bouton_fermer)
+        
+        layout_gerer.addLayout(layout_boutons)
+        
+        # Afficher la boîte de dialogue
+        dialog_gerer.exec()
 
     def lors_changement_cellule(self, ligne: int, colonne: int):
         """
@@ -573,21 +1223,30 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
         """
         about_text = (
             "<b>PV – Poids Variable (Inventaire produits alimentaires)</b><br><br>"
-            "Application de bureau développée pour la saisie rapide de codes-barres GS1 à poids variable.<br><br>"
+            "Application de bureau développée pour la saisie rapide de codes-barres à poids variable.<br><br>"
             "<b>Fonctionnement du parser :</b><br>"
-            "- Si le code a <b>13 chiffres</b> : extrait les 5 caractères (positions 7–11) → format “xx,xxx”.<br>"
-            "- Si le code contient un segment <b>310xYYYYYY</b> : extrait la valeur selon le chiffre après 310 "
-            "(ex. <i>3103</i> → 3 décimales).<br>"
-            "- <b>DLC</b> : si le segment <b>15YYMMDD</b> est présent après le 27ᵉ caractère (index 26), il est affiché "
-            "dans la colonne DLC au format DD/MM/YYYY (on suppose 20YY pour l'année).<br><br>"
+            "- Si le code a <b>13 chiffres</b> (format EAN-13) : extrait les 5 caractères (positions 7–11) → format “xx,xxx”.<br>"
+            "- Pour les codes <b>GS1</b> : parse séquentiellement les identifiants d'application (IA) selon la norme GS1 :<br>"
+            "  • IA <b>01</b> : GTIN (14 chiffres)<br>"
+            "  • IA <b>310x</b> : Poids net en kg (6 chiffres, x = nombre de décimales, ex. <i>3103</i> → 3 décimales)<br>"
+            "  • IA <b>15</b> : Date limite de consommation (6 chiffres AAMMJJ) lorsqu'il est rencontré affiche la DLC dans la colonne.<br>"
+            "  • IA <b>autres</b> : autres IA GS1 sont ignorées.<br>"
+            "- <b>Parse manuel</b> : pour les codes non reconnus, utilisez le bouton 'Parse manuel' pour définir "
+            "manuellement la position du poids avec les marqueurs <b>&gt;</b> (début), <b>,</b> (décimale), <b>&lt;</b> (fin). "
+            "Le pattern est sauvegardé et réutilisé automatiquement pour les codes similaires.<br><br>"
             "<b>Raccourcis :</b><br>"
             "- Champ 'Entrée scanner' : reçoit les scans successifs (pas besoin de cliquer).<br>"
             "- 'Créer CSV' : exporte la table (colonnes Poids et DLC) en fichier CSV.<br>"
-            "- 'Nettoyer' : vide l'inventaire après confirmation (efface aussi DLC).<br><br>"
+            "- 'Nettoyer' : vide l'inventaire après confirmation (efface aussi DLC).<br>"
+            "- 'Parse manuel' : permet de définir manuellement le parsing pour les codes non reconnus.<br><br>"
             "<b>Créé par :</b><br>"
             "WWW.GAIGHER.FR / Siret: 798 691 598 00014"
         )
-        QtWidgets.QMessageBox.information(self, "À propos - PV", about_text)
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle("À propos - PV")
+        msg_box.setText(about_text)
+        msg_box.setIcon(QtWidgets.QMessageBox.Icon.NoIcon)
+        msg_box.exec()
 
     def ajuster_echelle(self, delta: float):
         """
@@ -611,6 +1270,7 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
         # ajuster la taille des boutons
         self.zoom_moins.setFixedSize(int(28 * self.facteur_echelle), int(28 * self.facteur_echelle))
         self.zoom_plus.setFixedSize(int(28 * self.facteur_echelle), int(28 * self.facteur_echelle))
+        self.bouton_audio.setFixedSize(int(28 * self.facteur_echelle), int(28 * self.facteur_echelle))
         self.bouton_info.setFixedSize(int(28 * self.facteur_echelle), int(28 * self.facteur_echelle))
         self.bouton_effacer.setFixedHeight(max(22, int(24 * self.facteur_echelle)))
         self.bouton_somme.setFixedHeight(max(22, int(24 * self.facteur_echelle)))
@@ -622,6 +1282,16 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
                 self.table.setRowHeight(r, max(18, int(20 * self.facteur_echelle)))
         except Exception:
             pass
+
+    def basculer_son(self):
+        """Active ou désactive le feedback sonore"""
+        self.son_active = not self.son_active
+        if self.son_active:
+            self.bouton_audio.setText("🔊")
+            self.bouton_audio.setToolTip("Activer/Désactiver le son (actif)")
+        else:
+            self.bouton_audio.setText("🔇")
+            self.bouton_audio.setToolTip("Activer/Désactiver le son (muet)")
 
     def lors_clic_creer_csv(self):
         """
@@ -670,13 +1340,6 @@ class FenetrePrincipalePV(QtWidgets.QMainWindow):
             writer = csv.writer(f)
             writer.writerow(["Poids en kg", "DLC"])
             writer.writerows(lignes)
-
-    # gardons l'ancien nom du slot pour compatibilité si quelque part référencé (non utilisé)
-    def lors_clic_somme(self):
-        """
-        Ancien slot 'Somme' — redirige vers la création du CSV (compatibilité interne).
-        """
-        self.lors_clic_creer_csv()
 
 
 def principal():
