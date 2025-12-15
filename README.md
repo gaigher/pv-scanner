@@ -7,7 +7,9 @@
 
 
 **pv-scanner** est une application de bureau ergonomique développée pour la **saisie rapide de codes-barres GS1 à poids variable**, avec **export CSV**.  
-Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de produits alimentaires** via un simple **scanner de codes-barres**.
+Elle est idéale pour la **gestion d'inventaire** ou le **suivi de stocks de produits alimentaires** via un simple **scanner de codes-barres**.
+
+L'application utilise un **parsing séquentiel conforme à la norme GS1**, permettant de traiter automatiquement les codes-barres complexes avec plusieurs identifiants d'application (IA). Pour les codes non standard, une fonctionnalité de **parse manuel** permet de définir et sauvegarder des patterns personnalisés.
 
 ![Aperçu de l'application](images/interface.png)
 
@@ -30,9 +32,18 @@ Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de p
 - **Saisie rapide par scanner** : champ dédié pour la lecture instantanée.
 - **Extraction automatique** :
   - 🧮 **Poids** : extraction et formatage automatique du poids à partir du code scanné.
-  - 📅 **DLC (Date Limite de Consommation)** : extraite si présente dans le code-barres.
+  - 📅 **DLC (Date Limite de Consommation)** : extraite si présente dans le code-barres (IA 15).
+  - 🔄 **Conversion automatique** : les poids en livres (IA 320x) sont automatiquement convertis en kilogrammes.
+- **Parsing GS1 conforme à la norme** :
+  - Parsing séquentiel des identifiants d'application (IA) selon la norme GS1.
+  - Support de nombreux IA : GTIN (01), DLC (15), poids net (310x), poids en livres (320x), poids logistique (330x), etc.
+  - Gestion des IA à longueur variable (numéro de lot, série, etc.).
+- **Parse manuel** :
+  - Pour les codes non reconnus, définissez manuellement la position du poids avec des marqueurs (`>`, `,`, `<`).
+  - Les patterns sont sauvegardés et réutilisés automatiquement pour les codes similaires.
+  - Gestion des patterns sauvegardés (visualisation et suppression).
 - **Tableau interactif** :
-  - Collage multi-lignes possible (plusieurs scans d’un coup).
+  - Collage multi-lignes possible (plusieurs scans d'un coup).
   - Ligne vide toujours disponible pour un nouveau scan.
   - Édition manuelle des valeurs.
 - **Export CSV** : un clic génère un fichier CSV (UTF-8 avec BOM) compatible Excel.
@@ -40,23 +51,28 @@ Elle est idéale pour la **gestion d’inventaire** ou le **suivi de stocks de p
 - **Total automatique** : somme des poids scannés calculée en temps réel.
 - **Interface ergonomique** :
   - Zoom ajustable.
-  - Messages d’erreur visibles.
-  - Flash visuel lors de l’ajout.
-  - Feedback sonore intégré.
+  - Messages d'erreur visibles.
+  - Flash visuel lors de l'ajout.
+  - Feedback sonore intégré (activable/désactivable).
 
 ---
 
 
 ## 🖥️ Utilisation
 
-1. Lancez l’application :
+1. Lancez l'application :
    ```bash
    python pv-scanner.py
    ```
 2. Scannez vos codes-barres ou collez-les dans le champ prévu.  
-3. Vérifiez les informations affichées dans le tableau.  
-4. Cliquez sur **Créer CSV** pour exporter les données.  
-5. Utilisez **Nettoyer** pour vider le tableau si nécessaire.
+3. Vérifiez les informations affichées dans le tableau (poids et DLC extraits automatiquement).  
+4. **Pour les codes non reconnus** :
+   - Cliquez sur **"Parse manuel"**.
+   - Scannez le code, puis insérez les marqueurs `>`, `,` (optionnel), `<` pour indiquer la position du poids.
+   - Le pattern sera sauvegardé et réutilisé automatiquement pour les codes similaires.
+5. Cliquez sur **Créer CSV** pour exporter les données.  
+6. Utilisez **Nettoyer** pour vider le tableau si nécessaire.
+7. Utilisez le bouton 🔊/🔇 pour activer/désactiver le feedback sonore.
 
 ---
 
@@ -76,11 +92,32 @@ pip install PyQt6
 
 ## ⚙️ Notes techniques
 
-- Les poids sont extraits selon la norme **GS1** :
-  - 13 chiffres → extraction des positions **7–11**, format `xx,xxx`.
-  - Segment **310xYYYYYY** (caractères 16–26) → format décimal selon `x`.
-- La **DLC (AI 15)** est recherchée à partir du **27e caractère**, formatée `JJ/MM/AAAA`.
-- Le CSV est encodé en **UTF-8 avec BOM** pour compatibilité Excel.
+### Parsing des codes-barres
+
+L'application utilise un **parsing séquentiel conforme à la norme GS1** :
+
+1. **Format EAN-13** (13 caractères) :
+   - Extraction des positions **7–11** (5 caractères) → format `xx,xxx`.
+
+2. **Format GS1** (parsing séquentiel des IA) :
+   - **IA 01** : GTIN (14 chiffres) — ignoré pour l'extraction du poids.
+   - **IA 310x** : Poids net en kg (6 chiffres, `x` = nombre de décimales).
+     - Exemple : `3103` → 3 décimales (format `xxx,xxx`).
+   - **IA 320x** : Poids net en livres (6 chiffres) — **converti automatiquement en kg**.
+   - **IA 330x** : Poids logistique en kg (6 chiffres).
+   - **IA 15** : Date limite de consommation (6 chiffres AAMMJJ) → formatée `DD/MM/YYYY`.
+   - **IA à longueur variable** : numéro de lot (10), numéro de série (21), etc. — gérés automatiquement.
+   - **Autres IA** : ignorés mais pris en compte pour le parsing séquentiel.
+
+3. **Parse manuel** :
+   - Pour les codes non reconnus, utilisez le bouton **"Parse manuel"**.
+   - Insérez les marqueurs `>` (début), `,` (décimale optionnelle), `<` (fin) dans le code scanné.
+   - Le pattern est sauvegardé dans `patterns_parse.json` et réutilisé automatiquement.
+
+### Fichiers générés
+
+- **`patterns_parse.json`** : sauvegarde des patterns de parsing manuel (créé automatiquement).
+- **CSV exporté** : encodé en **UTF-8 avec BOM** pour compatibilité Excel.
 
 ---
 
